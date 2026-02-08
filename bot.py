@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO)
 # --- БАЗА ДАННЫХ ---
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
-        # Основная таблица пользователей
+        # 1. Создаем таблицу, если её вообще нет
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
@@ -38,11 +38,11 @@ async def init_db():
                 interested_in TEXT,
                 city TEXT,
                 bio TEXT,
-                qotd_answer TEXT,       -- Ответ на вопрос дня
+                qotd_answer TEXT,
                 content_ids TEXT,
                 content_type TEXT,
                 tea_pref TEXT,
-                search_video_only INTEGER DEFAULT 0, -- Фильтр только видео
+                search_video_only INTEGER DEFAULT 0,
                 is_active INTEGER DEFAULT 1,
                 is_banned INTEGER DEFAULT 0,
                 is_verified INTEGER DEFAULT 0,
@@ -50,9 +50,20 @@ async def init_db():
                 quiet_mode INTEGER DEFAULT 0,
                 mood_today TEXT,
                 last_active DATETIME,
-                reg_date DATETIME
+                reg_date DATETIME,
+                search_global INTEGER DEFAULT 1 -- По умолчанию ищем везде
             )
         """)
+        
+        # 2. МИГРАЦИЯ: Пытаемся добавить колонку search_global для старой базы
+        # Если база уже создана без этой колонки, этот код её добавит.
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN search_global INTEGER DEFAULT 1")
+            await db.commit()
+        except Exception:
+            # Колонка скорее всего уже есть, игнорируем ошибку
+            pass
+
         # Таблица лайков/дизлайков
         await db.execute("""
             CREATE TABLE IF NOT EXISTS votes (
@@ -63,14 +74,13 @@ async def init_db():
                 UNIQUE(from_id, to_id)
             )
         """)
-        # Таблица настроек (хранит Вопрос Дня)
+        # Таблица настроек
         await db.execute("""
             CREATE TABLE IF NOT EXISTS config (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
         """)
-        # Инициализация вопроса дня по умолчанию
         await db.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('qotd', 'Твоя суперспособность в реальной жизни?')")
         
         await db.commit()
@@ -82,19 +92,17 @@ def get_profile_link(user_id, username, name):
     return f"<a href='tg://user?id={user_id}'>{name}</a>"
 
 def is_quiet_hours():
-    """Проверка ночного времени (00:00 - 08:00)"""
     now = datetime.now().time()
     return time(0, 0) <= now < time(8, 0)
 
 async def check_tea_compatibility(tea1, tea2):
-    """Простая проверка совместимости по ключевым словам чая"""
     if not tea1 or not tea2: return False
     keywords = ["зеленый", "черный", "пуэр", "улун", "каркаде", "травяной", "мята", "чабрец", "кофе", "матча"]
     t1 = tea1.lower()
     t2 = tea2.lower()
     for k in keywords:
         if k in t1 and k in t2:
-            return k # Возвращаем совпавший вкус
+            return k 
     return None
 
 async def get_qotd():
@@ -104,12 +112,9 @@ async def get_qotd():
             return res[0] if res else "Как дела?"
 
 async def send_user_profile(chat_id, user_data, is_match=False, match_with_me=False, admin_view=False):
-    """
-    Универсальная функция отправки анкеты
-    """
     if not user_data: return
 
-    # Распаковка (с учетом новых полей)
+    # Распаковка
     uid = user_data[0]
     username = user_data[1]
     name = user_data[2]
@@ -120,8 +125,23 @@ async def send_user_profile(chat_id, user_data, is_match=False, match_with_me=Fa
     content_ids_raw = user_data[9]
     c_type = user_data[10]
     tea_pref = user_data[11]
-    # user_data[12] = search_video_only
-    quiet = user_data[17] if len(user_data) > 17 else 0
+    # 12 - search_video_only
+    # ...
+    # Извлекаем quiet_mode и search_global.
+    # Так как мы могли добавить колонку search_global в конец через ALTER, 
+    # её индекс может меняться. Лучше брать именованно, но для скорости оставим по индексам,
+    # предполагая стандартную структуру или доставая отдельно.
+    
+    # Для безопасности перечитаем настройки, если это моя анкета
+    quiet = 0
+    s_global = 1
+    
+    if match_with_me:
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT quiet_mode, search_global FROM users WHERE id=?", (uid,)) as c:
+                row = await c.fetchone()
+                if row:
+                    quiet, s_global = row[0], row[1]
     
     # Декодинг медиа
     try:
@@ -129,10 +149,8 @@ async def send_user_profile(chat_id, user_data, is_match=False, match_with_me=Fa
         if not isinstance(media_files, list): media_files = [content_ids_raw]
     except: media_files = []
 
-    # Тексты
     qotd_text = await get_qotd()
     
-    # Проверка совместимости по чаю (если смотрим чужой профиль)
     tea_match_text = ""
     if not match_with_me and not is_match and not admin_view:
         async with aiosqlite.connect(DB_NAME) as db:
@@ -141,12 +159,11 @@ async def send_user_profile(chat_id, user_data, is_match=False, match_with_me=Fa
                 if my_tea:
                     match_flavor = await check_tea_compatibility(my_tea[0], tea_pref)
                     if match_flavor:
-                        tea_match_text = f"\n🍃 <b>Вы оба любите {match_flavor}! Отличный повод обсудить это.</b>"
+                        tea_match_text = f"\n🍃 <b>Вы оба любите {match_flavor}!</b>"
 
     if is_match:
         header = f"💖 <b>ЭТО ВЗАИМНО!</b>\nКонтакт: {get_profile_link(uid, username, name)}\n"
-        # Safe Start Suggestion
-        header += f"\n🎲 <b>Тема для старта:</b>\n<i>«{qotd_text}»</i>\nСпроси, что {name} думает об этом!"
+        header += f"\n🎲 <b>Тема для старта:</b>\n<i>«{qotd_text}»</i>"
         kb = None
     elif admin_view:
         header = f"🕵️ <b>Админ-просмотр:</b> {name}, {age}\nID: `{uid}`"
@@ -154,7 +171,7 @@ async def send_user_profile(chat_id, user_data, is_match=False, match_with_me=Fa
     else:
         header = f"✨ <b>{name}</b>, {age}, {city}\n"
         if match_with_me:
-             kb = get_profile_kb(quiet)
+             kb = get_profile_kb(quiet, s_global)
         else:
              kb = get_rating_kb(uid)
 
@@ -228,11 +245,15 @@ def get_rating_kb(target_id):
         [InlineKeyboardButton(text="💌 Пожаловаться", callback_data=f"report_{target_id}")]
     ])
 
-def get_profile_kb(quiet_mode):
-    icon = "🔕" if quiet_mode else "🔔"
+def get_profile_kb(quiet_mode, search_global=1):
+    icon_quiet = "🔕" if quiet_mode else "🔔"
+    # Логика иконки: 1 = Глобус (везде), 0 = Город
+    icon_geo = "🌍 Везде" if search_global else "🏙 Город"
+    
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{icon} Уведомления", callback_data="toggle_quiet"),
+        [InlineKeyboardButton(text=f"{icon_quiet} Уведомления", callback_data="toggle_quiet"),
          InlineKeyboardButton(text="📹 Фильтр видео", callback_data="toggle_video_filter")],
+        [InlineKeyboardButton(text=f"🔍 Поиск: {icon_geo}", callback_data="toggle_geo")], # <-- НОВАЯ КНОПКА
         [InlineKeyboardButton(text="📝 Текст", callback_data="edit_text"),
          InlineKeyboardButton(text="📸 Фото/Видео", callback_data="edit_media")],
         [InlineKeyboardButton(text="☕️ Чай", callback_data="edit_tea"),
@@ -335,11 +356,11 @@ async def finish_reg(message, state, content, c_type):
     
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("""
-            INSERT OR REPLACE INTO users (id, username, name, age, gender, interested_in, city, bio, tea_pref, content_ids, content_type, is_verified, last_active, reg_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO users (id, username, name, age, gender, interested_in, city, bio, tea_pref, content_ids, content_type, is_verified, last_active, reg_date, search_global)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (message.from_user.id, message.from_user.username, data['name'], data['age'], 
               data['gender'], data['interested_in'], data['city'], data['bio'], data['tea'], 
-              json.dumps(content), c_type, is_verified, datetime.now(), datetime.now()))
+              json.dumps(content), c_type, is_verified, datetime.now(), datetime.now(), 1)) # 1 = Global search по дефолту
         await db.commit()
     
     await state.clear()
@@ -446,7 +467,7 @@ async def send_broadcast(message: types.Message, state: FSMContext):
     await state.clear()
 
 # ==========================================
-#               КНОПКИ МЕНЮ (ВОССТАНОВЛЕННЫЕ)
+#               КНОПКИ МЕНЮ
 # ==========================================
 
 @dp.message(F.text == "📞 Админ", StateFilter("*"))
@@ -548,14 +569,21 @@ async def my_profile(message: types.Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
     async with aiosqlite.connect(DB_NAME) as db:
+        # Достаем все поля. Для search_global берем конкретно, если он был добавлен позже
         async with db.execute("SELECT * FROM users WHERE id = ?", (uid,)) as c:
             user = await c.fetchone()
+        
+        # Получаем настройки для текста
+        async with db.execute("SELECT search_video_only, search_global FROM users WHERE id = ?", (uid,)) as c:
+            settings = await c.fetchone()
+            
+    if not user or not settings: return await message.answer("Сначала /start")
     
-    if not user: return await message.answer("Сначала /start")
+    v_filter = "ВКЛ" if settings[0] == 1 else "ВЫКЛ"
+    g_filter = "ВЕЗДЕ 🌍" if settings[1] == 1 else "ГОРОД 🏙"
     
-    v_filter = "ВКЛ" if user[12] == 1 else "ВЫКЛ"
     await send_user_profile(uid, user, match_with_me=True)
-    await message.answer(f"📹 Фильтр 'Только видео': <b>{v_filter}</b>", parse_mode="HTML")
+    await message.answer(f"⚙️ <b>Фильтры:</b>\n📹 Видео: {v_filter}\n🗺 Поиск: {g_filter}", parse_mode="HTML")
 
 @dp.callback_query(F.data == "toggle_video_filter")
 async def toggle_video(cb: types.CallbackQuery):
@@ -571,6 +599,24 @@ async def toggle_video(cb: types.CallbackQuery):
     await cb.answer(f"Фильтр видео {status}")
     await my_profile(cb.message, None) 
 
+@dp.callback_query(F.data == "toggle_geo")
+async def toggle_geo(cb: types.CallbackQuery):
+    uid = cb.from_user.id
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT search_global, quiet_mode FROM users WHERE id=?", (uid,)) as c:
+            row = await c.fetchone()
+            curr_global = row[0]
+            curr_quiet = row[1]
+        
+        new_val = 0 if curr_global == 1 else 1
+        await db.execute("UPDATE users SET search_global = ? WHERE id = ?", (new_val, uid))
+        await db.commit()
+    
+    status = "по всему миру 🌍" if new_val else "только в твоем городе 🏙"
+    await cb.answer(f"Поиск {status}")
+    # Обновляем клавиатуру на лету
+    await cb.message.edit_reply_markup(reply_markup=get_profile_kb(curr_quiet, new_val))
+
 @dp.message(F.text == "🌸 Искать пару")
 async def search_profiles(message: types.Message, state: FSMContext):
     uid = message.from_user.id
@@ -584,11 +630,12 @@ async def search_profiles(message: types.Message, state: FSMContext):
         await db.execute("UPDATE users SET last_active = ? WHERE id = ?", (datetime.now(), uid))
         await db.commit()
         
-        async with db.execute("SELECT gender, interested_in, search_video_only FROM users WHERE id=?", (uid,)) as c:
+        # Получаем данные пользователя, включая настройку города и глобального поиска
+        async with db.execute("SELECT gender, interested_in, search_video_only, city, search_global FROM users WHERE id=?", (uid,)) as c:
             me = await c.fetchone()
             if not me: return
 
-    my_gender, interest, video_only = me[0], me[1], me[2]
+    my_gender, interest, video_only, my_city, search_global = me[0], me[1], me[2], me[3], me[4]
     
     filters = ["id != ?", "is_verified = 1", "is_banned = 0"]
     params = [uid]
@@ -599,6 +646,14 @@ async def search_profiles(message: types.Message, state: FSMContext):
     
     if video_only:
         filters.append("content_type = 'video_note'")
+        
+    # --- ЛОГИКА ГОРОДА ---
+    # Если search_global == 0, добавляем фильтр по городу.
+    # Если 1 (ищем везде), то фильтр по городу просто не добавляем.
+    if search_global == 0 and my_city:
+        filters.append("city = ?")
+        params.append(my_city)
+    # ---------------------
         
     filters.append("id NOT IN (SELECT to_id FROM votes WHERE from_id = ?)")
     params.append(uid)
@@ -611,7 +666,11 @@ async def search_profiles(message: types.Message, state: FSMContext):
             user = await c.fetchone()
     
     if not user:
-        await message.answer("Анкеты по твоим параметрам закончились. 😔\nПопробуй отключить видео-фильтр или зайди позже.")
+        if search_global == 0:
+             msg = "В твоем городе анкеты закончились. 😔\nВключи 'Поиск: Везде' в своей анкете!"
+        else:
+             msg = "Анкеты по твоим параметрам закончились. 😔\nЗагляни позже!"
+        await message.answer(msg)
         return
 
     await send_user_profile(uid, user)
@@ -674,12 +733,16 @@ async def skip_prof(cb: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "toggle_quiet")
 async def toggle_quiet(cb: types.CallbackQuery):
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT quiet_mode FROM users WHERE id=?", (cb.from_user.id,)) as c:
-            curr = (await c.fetchone())[0]
-        new_val = 0 if curr == 1 else 1
+        # Получаем и quiet_mode и search_global чтобы перерисовать кнопку правильно
+        async with db.execute("SELECT quiet_mode, search_global FROM users WHERE id=?", (cb.from_user.id,)) as c:
+            row = await c.fetchone()
+            curr_quiet = row[0]
+            curr_global = row[1]
+            
+        new_val = 0 if curr_quiet == 1 else 1
         await db.execute("UPDATE users SET quiet_mode = ? WHERE id = ?", (new_val, cb.from_user.id))
         await db.commit()
-    await cb.message.edit_reply_markup(reply_markup=get_profile_kb(new_val))
+    await cb.message.edit_reply_markup(reply_markup=get_profile_kb(new_val, curr_global))
 
 @dp.callback_query(F.data == "re_register")
 async def re_register(cb: types.CallbackQuery, state: FSMContext):
