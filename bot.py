@@ -15,7 +15,7 @@ from aiogram.types import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- НАСТРОЙКИ ---
-TOKEN = "8505098635:AAGkM2qizQkil7Lfoy3OgjYVsS320APY5HQQ"  # Твой токен
+TOKEN = "8505098635:AAGkM2qizQkil7Lfoy3OgjYVsS320APY5HQ"  # Твой токен
 ADMIN_ID = 7467909699  # Твой ID
 DB_NAME = "cozy_dating.db"
 
@@ -551,4 +551,5 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+
     asyncio.run(main())
