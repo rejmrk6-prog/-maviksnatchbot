@@ -15,7 +15,7 @@ from aiogram.types import (
 )
 
 # --- НАСТРОЙКИ ---
-TOKEN = "ТВОЙ_ТОКЕН" 
+TOKEN = "8505098635:AAGkM2qizQkil7Lfoy3OgjYVsS320APY5HQ"
 ADMIN_ID = 7467909699
 DB_NAME = "cozy_dating.db"
 
@@ -48,6 +48,7 @@ async def init_db():
                 is_verified INTEGER DEFAULT 0,
                 report_count INTEGER DEFAULT 0,
                 quiet_mode INTEGER DEFAULT 0,
+                mood_today TEXT,
                 last_active DATETIME,
                 reg_date DATETIME
             )
@@ -194,6 +195,16 @@ class AdminStates(StatesGroup):
 class EditProfile(StatesGroup):
     waiting_for_input = State()
 
+class Mood(StatesGroup):
+    status = State()
+
+class AdminContact(StatesGroup):
+    message = State()
+
+class SearchMode(StatesGroup):
+    random = State()   
+    admirers = State()
+
 # --- КЛАВИАТУРЫ ---
 def get_main_menu():
     kb = [
@@ -218,7 +229,6 @@ def get_rating_kb(target_id):
     ])
 
 def get_profile_kb(quiet_mode):
-    # Добавлена кнопка редактирования "Вопроса дня" и фильтров
     icon = "🔕" if quiet_mode else "🔔"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"{icon} Уведомления", callback_data="toggle_quiet"),
@@ -250,7 +260,6 @@ def get_admin_action_kb(user_id):
 @dp.message(Command("start"), StateFilter("*"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    # Обновляем last_active
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE users SET last_active = ? WHERE id = ?", (datetime.now(), message.from_user.id))
         await db.commit()
@@ -263,7 +272,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer("Здравствуй! ✨\nДавай создадим твой уютный профиль.\nКак тебя зовут?")
     await state.set_state(Reg.name)
 
-# ... (Процесс регистрации имени и возраста стандартный) ...
 @dp.message(Reg.name)
 async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text)
@@ -279,6 +287,8 @@ async def process_age(message: types.Message, state: FSMContext):
 
 @dp.message(Reg.gender)
 async def process_gender(message: types.Message, state: FSMContext):
+    if "Парень" not in message.text and "Девушка" not in message.text:
+         return await message.answer("Используй кнопки.")
     code = "M" if "Парень" in message.text else "F"
     await state.update_data(gender=code)
     await message.answer("Кого ищем?", reply_markup=get_interest_kb())
@@ -301,18 +311,17 @@ async def process_city(message: types.Message, state: FSMContext):
 async def process_tea(message: types.Message, state: FSMContext):
     await state.update_data(tea=message.text)
     qotd = await get_qotd()
-    await message.answer(f"Пару слов о себе. 📝\n\nКстати, можешь сразу ответить на вопрос дня: <i>{qotd}</i>")
+    await message.answer(f"Пару слов о себе. 📝\n\nКстати, можешь сразу ответить на вопрос дня: <i>{qotd}</i>", parse_mode="HTML")
     await state.set_state(Reg.bio)
 
 @dp.message(Reg.bio)
 async def process_bio(message: types.Message, state: FSMContext):
     await state.update_data(bio=message.text)
-    await message.answer("Пришли фото (до 3х) или **видео-кружочек** (лучше для поиска!). 📸")
+    await message.answer("Пришли фото (до 3х) или **видео-кружочек** (лучше для поиска!). 📸", parse_mode="Markdown")
     await state.set_state(Reg.media)
 
 @dp.message(Reg.media)
 async def process_media(message: types.Message, state: FSMContext):
-    # (Упрощенная загрузка для краткости)
     if message.video_note:
         await finish_reg(message, state, [message.video_note.file_id], 'video_note')
     elif message.photo:
@@ -336,7 +345,6 @@ async def finish_reg(message, state, content, c_type):
     await state.clear()
     await message.answer("Анкета отправлена! ⏳", reply_markup=get_main_menu())
     
-    # Уведомление админу
     if not is_verified:
         await bot.send_message(ADMIN_ID, f"🆕 Новая анкета: {data['name']}, {data['city']}", reply_markup=get_admin_action_kb(message.from_user.id))
 
@@ -352,12 +360,9 @@ async def admin_panel(message: types.Message):
 async def show_stats(cb: types.CallbackQuery):
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT COUNT(*) FROM users") as c: total = (await c.fetchone())[0]
-        # Active in last 24h
         async with db.execute("SELECT COUNT(*) FROM users WHERE last_active > datetime('now', '-1 day')") as c: dau = (await c.fetchone())[0]
-        # Gender ratio
         async with db.execute("SELECT COUNT(*) FROM users WHERE gender='M'") as c: m = (await c.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM users WHERE gender='F'") as c: f = (await c.fetchone())[0]
-        # Matches today
         async with db.execute("SELECT COUNT(*) FROM votes WHERE timestamp > datetime('now', '-1 day') AND reaction IN ('like','love')") as c: likes = (await c.fetchone())[0]
         
     txt = (f"📊 <b>Статистика:</b>\n\n"
@@ -370,7 +375,6 @@ async def show_stats(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "admin_reports")
 async def show_reports(cb: types.CallbackQuery):
     async with aiosqlite.connect(DB_NAME) as db:
-        # Берем юзера с наибольшим числом репортов
         sql = "SELECT * FROM users WHERE report_count > 0 AND is_banned = 0 ORDER BY report_count DESC LIMIT 1"
         async with db.execute(sql) as c:
             user = await c.fetchone()
@@ -435,12 +439,106 @@ async def send_broadcast(message: types.Message, state: FSMContext):
             else:
                 await bot.send_message(uid, f"🔔 <b>Новости:</b>\n{msg_text}", parse_mode="HTML")
             count += 1
-            await asyncio.sleep(0.05) # Лимит телеграма
-        except:
-            pass # Бот заблокирован пользователем
+            await asyncio.sleep(0.05)
+        except: pass
             
     await message.answer(f"Рассылка завершена. Дошло: {count}")
     await state.clear()
+
+# ==========================================
+#               КНОПКИ МЕНЮ (ВОССТАНОВЛЕННЫЕ)
+# ==========================================
+
+@dp.message(F.text == "📞 Админ", StateFilter("*"))
+async def contact_admin_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Напиши сообщение админу (или предложение). 🖊\n(/cancel для отмены)")
+    await state.set_state(AdminContact.message)
+
+@dp.message(AdminContact.message)
+async def contact_admin_send(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=get_main_menu())
+        return
+
+    text_to_admin = f"📩 **Сообщение от пользователя**\nОт: {message.from_user.full_name} (ID: `{message.from_user.id}`)\n\n{message.text}"
+    try:
+        await bot.send_message(ADMIN_ID, text_to_admin, parse_mode="Markdown")
+        await message.answer("Сообщение отправлено! Спасибо. 📨", reply_markup=get_main_menu())
+    except Exception as e:
+        await message.answer("Ошибка отправки. Попробуй позже.")
+        logging.error(e)
+    
+    await state.clear()
+
+@dp.message(F.text == "📓 Дневник", StateFilter("*"))
+async def mood_diary(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Какая погода у тебя в душе? 🌦")
+    await state.set_state(Mood.status)
+
+@dp.message(Mood.status)
+async def process_mood(message: types.Message, state: FSMContext):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET mood_today = ? WHERE id = ?", (message.text, message.from_user.id))
+        await db.commit()
+    await message.answer("Записал в дневник. 🫂", reply_markup=get_main_menu())
+    await state.clear()
+
+@dp.message(F.text == "💞 Взаимные", StateFilter("*"))
+async def show_mutual_likes(message: types.Message, state: FSMContext):
+    await state.clear()
+    my_id = message.chat.id
+    async with aiosqlite.connect(DB_NAME) as db:
+        sql = """
+            SELECT u.name, u.username, u.id 
+            FROM users u
+            JOIN votes v1 ON u.id = v1.to_id 
+            JOIN votes v2 ON u.id = v2.from_id
+            WHERE v1.from_id = ? AND v1.reaction IN ('like', 'love')
+            AND v2.to_id = ? AND v2.reaction IN ('like', 'love')
+        """
+        async with db.execute(sql, (my_id, my_id)) as cursor:
+            matches = await cursor.fetchall()
+
+    if not matches:
+        await message.answer("Пока нет взаимных симпатий. Продолжай искать! 🌸")
+        return
+
+    text = "<b>💞 Твои взаимные симпатии:</b>\n\n"
+    for name, username, uid in matches:
+        link = get_profile_link(uid, username, name)
+        text += f"• {link}\n"
+    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+
+@dp.message(F.text == "💘 Кто меня лайкнул", StateFilter("*"))
+async def show_who_liked_me(message: types.Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(SearchMode.admirers)
+    my_id = message.chat.id
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Ищем тех, кто меня лайкнул, но кому я еще ничего не ответил
+        sql = """
+            SELECT u.id, u.username, u.name, u.age, u.gender, u.interested_in, u.city, u.bio, u.qotd_answer, u.content_ids, u.content_type, u.tea_pref, 
+                   u.search_video_only, u.is_active, u.is_banned, u.is_verified, u.report_count, u.quiet_mode 
+            FROM users u
+            JOIN votes v ON u.id = v.from_id
+            WHERE v.to_id = ? AND v.reaction IN ('like', 'love')
+            AND u.id NOT IN (SELECT to_id FROM votes WHERE from_id = ?)
+            LIMIT 1
+        """
+        async with db.execute(sql, (my_id, my_id)) as cursor:
+            user = await cursor.fetchone()
+
+    if not user:
+        await message.answer("Новых лайков пока нет. Перехожу к общему поиску... 🌸")
+        await search_profiles(message, state)
+        return
+
+    await message.answer("💘 <b>Ты понравился этому человеку!</b>", parse_mode="HTML")
+    await send_user_profile(my_id, user, is_match=False, match_with_me=False)
 
 # ==========================================
 #               ПОИСК И АНКЕТЫ
@@ -455,7 +553,6 @@ async def my_profile(message: types.Message, state: FSMContext):
     
     if not user: return await message.answer("Сначала /start")
     
-    # Статус видео фильтра
     v_filter = "ВКЛ" if user[12] == 1 else "ВЫКЛ"
     await send_user_profile(uid, user, match_with_me=True)
     await message.answer(f"📹 Фильтр 'Только видео': <b>{v_filter}</b>", parse_mode="HTML")
@@ -472,26 +569,27 @@ async def toggle_video(cb: types.CallbackQuery):
     
     status = "включен (ищем только кружочки)" if new_val else "выключен"
     await cb.answer(f"Фильтр видео {status}")
-    # Обновляем сообщение
     await my_profile(cb.message, None) 
 
 @dp.message(F.text == "🌸 Искать пару")
 async def search_profiles(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     
-    # Обновляем время активности
+    current_state = await state.get_state()
+    # Если мы не в режиме просмотра лайков, ставим рандом
+    if current_state != SearchMode.admirers:
+         await state.set_state(SearchMode.random)
+    
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE users SET last_active = ? WHERE id = ?", (datetime.now(), uid))
         await db.commit()
         
-        # Получаем параметры поиска
         async with db.execute("SELECT gender, interested_in, search_video_only FROM users WHERE id=?", (uid,)) as c:
             me = await c.fetchone()
             if not me: return
 
     my_gender, interest, video_only = me[0], me[1], me[2]
     
-    # SQL Конструктор
     filters = ["id != ?", "is_verified = 1", "is_banned = 0"]
     params = [uid]
 
@@ -499,11 +597,9 @@ async def search_profiles(message: types.Message, state: FSMContext):
         filters.append("gender = ?")
         params.append(interest)
     
-    # Фильтр "Только видео"
     if video_only:
         filters.append("content_type = 'video_note'")
         
-    # Исключаем тех, кого уже видели
     filters.append("id NOT IN (SELECT to_id FROM votes WHERE from_id = ?)")
     params.append(uid)
 
@@ -521,7 +617,7 @@ async def search_profiles(message: types.Message, state: FSMContext):
     await send_user_profile(uid, user)
 
 @dp.callback_query(F.data.startswith("vote_"))
-async def process_vote(cb: types.CallbackQuery):
+async def process_vote(cb: types.CallbackQuery, state: FSMContext):
     _, target_id, reaction = cb.data.split("_")
     target_id = int(target_id)
     uid = cb.from_user.id
@@ -533,50 +629,63 @@ async def process_vote(cb: types.CallbackQuery):
                          (uid, target_id, reaction, datetime.now()))
         await db.commit()
         
-        # Если лайк
         if reaction in ['like', 'love']:
-            # Проверка взаимности
             async with db.execute("SELECT reaction FROM votes WHERE from_id=? AND to_id=?", (target_id, uid)) as c:
                 match = await c.fetchone()
             
             if match and match[0] in ['like', 'love']:
-                # МЭТЧ!
+                # МЭТЧ
                 async with db.execute("SELECT * FROM users WHERE id=?", (target_id,)) as c: t_data = await c.fetchone()
                 async with db.execute("SELECT * FROM users WHERE id=?", (uid,)) as c: m_data = await c.fetchone()
                 
-                # Отправка мне
                 await send_user_profile(uid, t_data, is_match=True)
                 
-                # Отправка ему (с учетом Ночного Режима)
                 is_quiet = False
                 try:
-                    if t_data[17] == 1: is_quiet = True # Проверка quiet_mode юзера
+                    if t_data[17] == 1: is_quiet = True
                 except: pass
                 
                 if not is_quiet and not is_quiet_hours():
                     await send_user_profile(target_id, m_data, is_match=True)
-                elif is_quiet_hours():
-                    # Можно сохранить в "отложенные", но пока просто не шлем уведомление, увидит в "Взаимные"
-                    pass
             
             elif reaction == 'love':
-                # Суперлайк уведомление (если не ночь)
                 if not is_quiet_hours():
                      try: await bot.send_message(target_id, "Кто-то отправил тебе 💘!") 
                      except: pass
-
-    # Следующая анкета
-    await search_profiles(cb.message, None)
+    
+    # Проверяем режим. Если смотрели "Кто меня лайкнул", показываем следующего лайкнувшего
+    current_state = await state.get_state()
+    if current_state == SearchMode.admirers:
+        await show_who_liked_me(cb.message, state)
+    else:
+        await search_profiles(cb.message, state)
 
 @dp.callback_query(F.data == "skip")
-async def skip_prof(cb: types.CallbackQuery):
+async def skip_prof(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.delete()
-    # Можно записывать дизлайк, чтобы не показывать снова
+    
+    # Проверяем режим
+    current_state = await state.get_state()
+    if current_state == SearchMode.admirers:
+        await show_who_liked_me(cb.message, state)
+    else:
+        await search_profiles(cb.message, state)
+
+@dp.callback_query(F.data == "toggle_quiet")
+async def toggle_quiet(cb: types.CallbackQuery):
     async with aiosqlite.connect(DB_NAME) as db:
-        # Получаем ID из коллбека предыдущей кнопки (грязно, но работает) или просто пропускаем запись
-        # Лучше просто вызвать поиск снова
-        pass 
-    await search_profiles(cb.message, None)
+        async with db.execute("SELECT quiet_mode FROM users WHERE id=?", (cb.from_user.id,)) as c:
+            curr = (await c.fetchone())[0]
+        new_val = 0 if curr == 1 else 1
+        await db.execute("UPDATE users SET quiet_mode = ? WHERE id = ?", (new_val, cb.from_user.id))
+        await db.commit()
+    await cb.message.edit_reply_markup(reply_markup=get_profile_kb(new_val))
+
+@dp.callback_query(F.data == "re_register")
+async def re_register(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.answer("Давай создадим новую анкету. Как тебя зовут?")
+    await state.set_state(Reg.name)
 
 # --- РЕДАКТИРОВАНИЕ ПРОФИЛЯ ---
 @dp.callback_query(F.data == "edit_qotd")
@@ -586,16 +695,52 @@ async def edit_qotd_start(cb: types.CallbackQuery, state: FSMContext):
     await state.set_state(EditProfile.waiting_for_input)
     await state.update_data(mode="qotd")
 
+@dp.callback_query(F.data == "edit_text")
+async def edit_text_start(cb: types.CallbackQuery, state: FSMContext):
+    await cb.message.answer("Напиши новый текст 'О себе':")
+    await state.set_state(EditProfile.waiting_for_input)
+    await state.update_data(mode="text")
+
+@dp.callback_query(F.data == "edit_tea")
+async def edit_tea_start(cb: types.CallbackQuery, state: FSMContext):
+    await cb.message.answer("Напиши свои новые предпочтения в чае:")
+    await state.set_state(EditProfile.waiting_for_input)
+    await state.update_data(mode="tea")
+
+@dp.callback_query(F.data == "edit_media")
+async def edit_media_start(cb: types.CallbackQuery, state: FSMContext):
+    await cb.message.answer("Пришли новое фото или видео-кружочек:")
+    await state.set_state(EditProfile.waiting_for_input)
+    await state.update_data(mode="media")
+
 @dp.message(EditProfile.waiting_for_input)
 async def save_profile_edit(message: types.Message, state: FSMContext):
     data = await state.get_data()
     mode = data.get("mode")
+    uid = message.from_user.id
     
     async with aiosqlite.connect(DB_NAME) as db:
         if mode == "qotd":
-            await db.execute("UPDATE users SET qotd_answer = ? WHERE id = ?", (message.text, message.from_user.id))
+            await db.execute("UPDATE users SET qotd_answer = ? WHERE id = ?", (message.text, uid))
             await message.answer("Ответ сохранен! 👌")
-    # ... тут можно добавить условия для других полей (edit_text, edit_tea и т.д.) ...
+        elif mode == "text":
+            await db.execute("UPDATE users SET bio = ? WHERE id = ?", (message.text, uid))
+            await message.answer("Био обновлено!")
+        elif mode == "tea":
+            await db.execute("UPDATE users SET tea_pref = ? WHERE id = ?", (message.text, uid))
+            await message.answer("Чайные вкусы обновлены!")
+        elif mode == "media":
+            if message.video_note:
+                 c = json.dumps([message.video_note.file_id])
+                 t = "video_note"
+            elif message.photo:
+                 c = json.dumps([message.photo[-1].file_id])
+                 t = "photo"
+            else: return await message.answer("Пришли медиа!")
+            
+            await db.execute("UPDATE users SET content_ids = ?, content_type = ? WHERE id = ?", (c, t, uid))
+            await message.answer("Медиа обновлено!")
+
         await db.commit()
     
     await state.clear()
@@ -604,7 +749,7 @@ async def save_profile_edit(message: types.Message, state: FSMContext):
 # --- MAIN ---
 async def main():
     await init_db()
-    print("Bot is running with COZY update 2.0 🚀")
+    print("Bot is running with FULL functionality 🚀")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
